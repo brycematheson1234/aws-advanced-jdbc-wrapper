@@ -47,6 +47,7 @@ import software.amazon.jdbc.plugin.limitless.LimitlessConnectionPlugin;
 import software.amazon.jdbc.plugin.readwritesplitting.ReadWriteSplittingPlugin;
 import software.amazon.jdbc.plugin.staledns.AuroraStaleDnsPlugin;
 import software.amazon.jdbc.plugin.strategy.fastestresponse.FastestResponseStrategyPlugin;
+import software.amazon.jdbc.plugin.strategy.poolagnosticleastconnections.PoolAgnosticLeastConnectionsPlugin;
 import software.amazon.jdbc.profile.ConfigurationProfile;
 import software.amazon.jdbc.util.FullServicesContainer;
 import software.amazon.jdbc.util.Messages;
@@ -84,6 +85,7 @@ public class ConnectionPluginManager implements CanReleaseResources, Wrapper {
           put(AuroraStaleDnsPlugin.class, "plugin:auroraStaleDns");
           put(ReadWriteSplittingPlugin.class, "plugin:readWriteSplitting");
           put(FastestResponseStrategyPlugin.class, "plugin:fastestResponseStrategy");
+          put(PoolAgnosticLeastConnectionsPlugin.class, "plugin:poolAgnosticLeastConnections");
           put(DefaultConnectionPlugin.class, "plugin:targetDriver");
           put(AuroraInitialConnectionStrategyPlugin.class, "plugin:initialConnection");
           put(CustomEndpointPlugin.class, "plugin:customEndpoint");
