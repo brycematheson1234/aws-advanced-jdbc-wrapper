@@ -46,6 +46,7 @@ import software.amazon.jdbc.plugin.failover.FailoverConnectionPluginFactory;
 import software.amazon.jdbc.plugin.federatedauth.FederatedAuthPluginFactory;
 import software.amazon.jdbc.plugin.federatedauth.OktaAuthPluginFactory;
 import software.amazon.jdbc.plugin.iam.IamAuthConnectionPluginFactory;
+import software.amazon.jdbc.plugin.leastconnectionsnointernalpool.LeastConnectionsNoInternalPoolConnectionPluginFactory;
 import software.amazon.jdbc.plugin.limitless.LimitlessConnectionPluginFactory;
 import software.amazon.jdbc.plugin.readwritesplitting.ReadWriteSplittingPluginFactory;
 import software.amazon.jdbc.plugin.staledns.AuroraStaleDnsPluginFactory;
@@ -88,6 +89,7 @@ public class ConnectionPluginChainBuilder {
           put("initialConnection", new AuroraInitialConnectionStrategyPluginFactory());
           put("limitless", new LimitlessConnectionPluginFactory());
           put("bg", new BlueGreenConnectionPluginFactory());
+          put("leastConnectionsNoInternalPool", new LeastConnectionsNoInternalPoolConnectionPluginFactory());
         }
       };
 
@@ -103,6 +105,7 @@ public class ConnectionPluginChainBuilder {
           put(DataCacheConnectionPluginFactory.class, 200);
           put(CustomEndpointPluginFactory.class, 380);
           put(AuroraInitialConnectionStrategyPluginFactory.class, 390);
+          put(LeastConnectionsNoInternalPoolConnectionPluginFactory.class, 395);
           put(AuroraConnectionTrackerPluginFactory.class, 400);
           put(AuroraStaleDnsPluginFactory.class, 500);
           put(BlueGreenConnectionPluginFactory.class, 550);
