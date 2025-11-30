@@ -43,6 +43,7 @@ import software.amazon.jdbc.plugin.failover.FailoverConnectionPlugin;
 import software.amazon.jdbc.plugin.federatedauth.FederatedAuthPlugin;
 import software.amazon.jdbc.plugin.federatedauth.OktaAuthPlugin;
 import software.amazon.jdbc.plugin.iam.IamAuthConnectionPlugin;
+import software.amazon.jdbc.plugin.leastconnectionsnointernalpool.LeastConnectionsNoInternalPoolConnectionPlugin;
 import software.amazon.jdbc.plugin.limitless.LimitlessConnectionPlugin;
 import software.amazon.jdbc.plugin.readwritesplitting.ReadWriteSplittingPlugin;
 import software.amazon.jdbc.plugin.staledns.AuroraStaleDnsPlugin;
@@ -87,6 +88,7 @@ public class ConnectionPluginManager implements CanReleaseResources, Wrapper {
           put(DefaultConnectionPlugin.class, "plugin:targetDriver");
           put(AuroraInitialConnectionStrategyPlugin.class, "plugin:initialConnection");
           put(CustomEndpointPlugin.class, "plugin:customEndpoint");
+          put(LeastConnectionsNoInternalPoolConnectionPlugin.class, "plugin:leastConnectionsNoInternalPool");
         }
       };
 
