@@ -24,6 +24,7 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Logger;
@@ -47,6 +48,12 @@ public class AuroraConnectionTrackerPlugin extends AbstractConnectionPlugin {
   private final Set<String> subscribedMethods;
 
   private static final AtomicLong hostListRefreshEndTimeNano = new AtomicLong(0);
+
+  // Tracks connections that have already had their aliases populated.
+  // Key: System.identityHashCode(connection), Value: true (marker)
+  // This prevents redundant alias queries when the same physical connection is reused
+  // (e.g., when borrowing from internal connection pools like HikariPooledConnectionProvider).
+  private static final Set<Integer> aliasedConnections = ConcurrentHashMap.newKeySet();
 
   private final PluginService pluginService;
   private final RdsUtils rdsHelper;
@@ -90,8 +97,17 @@ public class AuroraConnectionTrackerPlugin extends AbstractConnectionPlugin {
     if (conn != null) {
       final RdsUrlType type = this.rdsHelper.identifyRdsType(hostSpec.getHost());
       if (type.isRdsCluster() || type == RdsUrlType.OTHER || type == RdsUrlType.IP_ADDRESS) {
-        hostSpec.resetAliases();
-        this.pluginService.fillAliases(conn, hostSpec);
+        // Only populate aliases if this physical connection hasn't been aliased yet.
+        // This avoids redundant alias queries when reusing pooled connections
+        // (e.g., with HikariPooledConnectionProvider internal pooling).
+        final int connectionId = System.identityHashCode(conn);
+        if (aliasedConnections.add(connectionId)) {
+          // First time seeing this connection - reset and populate aliases.
+          // resetAliases() is needed because for cluster endpoints the hostSpec may have
+          // stale aliases from a previous connection (fix for issue #431).
+          hostSpec.resetAliases();
+          this.pluginService.fillAliases(conn, hostSpec);
+        }
       }
       tracker.populateOpenedConnectionQueue(hostSpec, conn);
     }
@@ -132,7 +148,12 @@ public class AuroraConnectionTrackerPlugin extends AbstractConnectionPlugin {
       final T result = jdbcMethodFunc.call();
       if ((methodName.equals(JdbcMethod.CONNECTION_CLOSE.methodName)
           || methodName.equals(JdbcMethod.CONNECTION_ABORT.methodName))) {
-        tracker.removeConnectionTracking(currentHostSpec, this.pluginService.getCurrentConnection());
+        final Connection currentConnection = this.pluginService.getCurrentConnection();
+        tracker.removeConnectionTracking(currentHostSpec, currentConnection);
+        // Clean up alias tracking for this connection to prevent memory leaks.
+        if (currentConnection != null) {
+          aliasedConnections.remove(System.identityHashCode(currentConnection));
+        }
       }
       return result;
 
@@ -191,5 +212,12 @@ public class AuroraConnectionTrackerPlugin extends AbstractConnectionPlugin {
         this.needUpdateCurrentWriter = true;
       }
     }
+  }
+
+  /**
+   * Clears the aliased connections cache. Primarily for testing purposes.
+   */
+  public static void clearAliasedConnectionsCache() {
+    aliasedConnections.clear();
   }
 }

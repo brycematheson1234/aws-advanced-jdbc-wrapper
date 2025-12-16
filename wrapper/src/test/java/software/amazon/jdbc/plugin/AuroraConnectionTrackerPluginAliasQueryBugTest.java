@@ -22,6 +22,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -144,26 +145,22 @@ class AuroraConnectionTrackerPluginAliasQueryBugTest {
     closeable.close();
     fillAliasesCallCount.set(0);
     aliasQueryExecutionCount.set(0);
+    AuroraConnectionTrackerPlugin.clearAliasedConnectionsCache();
   }
 
   /**
-   * This test demonstrates the bug where alias queries are executed on EVERY getConnection()
-   * call when using internal connection pooling (HikariPooledConnectionProvider) with
+   * This test verifies that alias queries are only executed ONCE per physical connection,
+   * even when using internal connection pooling (HikariPooledConnectionProvider) with
    * cluster endpoints.
    *
    * <p><b>Scenario:</b> Using customEndpoint + initialConnection plugins with internal pooling.
    * The hostSpec URL remains the CLUSTER endpoint (cluster-custom-xxx) throughout, even though
    * HikariPooledConnectionProvider internally pools connections to specific instances.
    *
-   * <p><b>Bug mechanism:</b>
+   * <p><b>Expected behavior (after fix):</b>
    * <ol>
-   *   <li>Application calls getConnection()</li>
-   *   <li>Plugin chain invokes AuroraConnectionTrackerPlugin.connect()</li>
-   *   <li>hostSpec.getHost() = cluster endpoint URL → isRdsCluster()=true</li>
-   *   <li>resetAliases() clears any cached aliases</li>
-   *   <li>fillAliases() executes SQL queries to re-identify the host</li>
-   *   <li>HikariPooledConnectionProvider returns pooled connection (no new physical connection)</li>
-   *   <li>Repeat on EVERY getConnection() call</li>
+   *   <li>First getConnection() → plugin.connect() → fillAliases() called (1 query)</li>
+   *   <li>Subsequent getConnection() calls with same Connection → fillAliases() NOT called</li>
    * </ol>
    *
    * <p><b>Why standard config doesn't have this bug:</b> With external HikariCP pooling,
@@ -171,7 +168,7 @@ class AuroraConnectionTrackerPluginAliasQueryBugTest {
    * operation doesn't invoke the AWS wrapper at all.
    */
   @Test
-  void testAliasQueriesExecutedOnEveryGetConnectionWithInternalPoolingAndClusterEndpoint() throws SQLException {
+  void testAliasQueriesExecutedOnlyOncePerPhysicalConnectionWithInternalPooling() throws SQLException {
     HostSpec customClusterHostSpec = new HostSpecBuilder(new SimpleHostAvailabilityStrategy())
         .host(CUSTOM_CLUSTER_HOST)
         .port(PORT)
@@ -201,10 +198,11 @@ class AuroraConnectionTrackerPluginAliasQueryBugTest {
       assertEquals(mockConnection, conn);
     }
 
-    verify(mockPluginService, times(numberOfGetConnectionCalls))
+    // After fix: fillAliases should only be called once for the same physical connection
+    verify(mockPluginService, times(1))
         .fillAliases(eq(mockConnection), eq(customClusterHostSpec));
-    assertEquals(numberOfGetConnectionCalls, fillAliasesCallCount.get());
-    assertEquals(numberOfGetConnectionCalls, aliasQueryExecutionCount.get());
+    assertEquals(1, fillAliasesCallCount.get());
+    assertEquals(1, aliasQueryExecutionCount.get());
   }
 
   /**
@@ -251,25 +249,18 @@ class AuroraConnectionTrackerPluginAliasQueryBugTest {
   }
 
   /**
-   * This test demonstrates the expected behavior after the bug is fixed.
+   * This test verifies that fillAliases is called for each DIFFERENT physical connection,
+   * but NOT when the same connection is reused.
    *
-   * <p><b>Expected behavior with internal pooling:</b>
+   * <p><b>Expected behavior:</b>
    * <ul>
    *   <li>First getConnection() to a new host → creates physical connection → fillAliases called</li>
-   *   <li>Subsequent getConnection() calls → borrow from pool → fillAliases should NOT be called</li>
+   *   <li>Subsequent getConnection() calls with same connection → fillAliases NOT called</li>
+   *   <li>New physical connection → fillAliases called again</li>
    * </ul>
-   *
-   * <p><b>Current behavior (bug):</b> fillAliases is called on EVERY getConnection() because
-   * resetAliases() unconditionally clears the cache; there is no guard to skip alias queries
-   * when reusing the same physical connection instance.
-   *
-   * <p><b>Potential fix:</b> AuroraConnectionTrackerPlugin should check if this is a pooled
-   * connection borrow (same physical connection) vs a new physical connection, and skip
-   * alias queries for pooled borrows. Alternatively, the internal pooling architecture could
-   * avoid routing pool borrows through the full plugin chain.
    */
   @Test
-  void testAliasQueriesShouldOnlyExecuteOncePerPhysicalConnection_BUG_DEMONSTRATION() throws SQLException {
+  void testAliasQueriesCalledOncePerDistinctPhysicalConnection() throws SQLException {
     HostSpec customClusterHostSpec = new HostSpecBuilder(new SimpleHostAvailabilityStrategy())
         .host(CUSTOM_CLUSTER_HOST)
         .port(PORT)
@@ -283,46 +274,36 @@ class AuroraConnectionTrackerPluginAliasQueryBugTest {
         rdsUtils,
         mockTracker);
 
-    JdbcCallable<Connection, SQLException> connectFunc = () -> mockConnection;
-
-    int numberOfGetConnectionCalls = 5;
-    for (int i = 0; i < numberOfGetConnectionCalls; i++) {
-      Connection conn = plugin.connect(
-          PROTOCOL,
-          customClusterHostSpec,
-          new Properties(),
-          i == 0,
-          connectFunc);
-      assertEquals(mockConnection, conn);
+    // First, call multiple times with the same connection (simulating pool borrow)
+    JdbcCallable<Connection, SQLException> connectFunc1 = () -> mockConnection;
+    for (int i = 0; i < 5; i++) {
+      plugin.connect(PROTOCOL, customClusterHostSpec, new Properties(), i == 0, connectFunc1);
     }
+    assertEquals(1, fillAliasesCallCount.get(), "fillAliases should be called once for first connection");
 
-    assertEquals(
-        numberOfGetConnectionCalls,
-        fillAliasesCallCount.get(),
-        "BUG DEMONSTRATED: fillAliases() was called " + fillAliasesCallCount.get() +
-            " times for " + numberOfGetConnectionCalls + " plugin.connect() calls with the SAME " +
-            "Connection instance. Expected: 1 (only for the first call with a new physical connection). " +
-            "This shows that alias queries (@@hostname:@@port, @@aurora_server_id) " +
-            "are being executed on EVERY getConnection(), causing unnecessary database round-trips.");
+    // Now create a second mock connection (simulating a new physical connection)
+    Connection mockConnection2 = org.mockito.Mockito.mock(Connection.class);
+    when(mockConnection2.createStatement()).thenReturn(mockStatement);
+    JdbcCallable<Connection, SQLException> connectFunc2 = () -> mockConnection2;
 
-    assertEquals(
-        numberOfGetConnectionCalls,
-        aliasQueryExecutionCount.get(),
-        "BUG DEMONSTRATED: Alias SQL query was executed " + aliasQueryExecutionCount.get() +
-            " times for the same Connection instance. Expected: 1. " +
-            "Each execution represents unnecessary network latency.");
+    // Call with the second connection
+    plugin.connect(PROTOCOL, customClusterHostSpec, new Properties(), false, connectFunc2);
+    assertEquals(2, fillAliasesCallCount.get(), "fillAliases should be called for each distinct connection");
+
+    // Call again with the second connection (should not increment)
+    plugin.connect(PROTOCOL, customClusterHostSpec, new Properties(), false, connectFunc2);
+    assertEquals(2, fillAliasesCallCount.get(), "fillAliases should NOT be called again for same connection");
+
+    // Call again with the first connection (should not increment)
+    plugin.connect(PROTOCOL, customClusterHostSpec, new Properties(), false, connectFunc1);
+    assertEquals(2, fillAliasesCallCount.get(), "fillAliases should NOT be called again for already-seen connection");
   }
 
   /**
-   * Tests that writer cluster endpoints also trigger alias queries on every plugin.connect() call.
-   *
-   * <p><b>Note:</b> This bug does NOT manifest with standard external HikariCP pooling because
-   * HikariCP only invokes the AWS wrapper when creating new physical connections. This test
-   * only demonstrates the plugin behavior in isolation - the bug requires internal pooling
-   * (HikariPooledConnectionProvider) to manifest in practice.
+   * Tests that writer cluster endpoints correctly trigger alias queries only once per physical connection.
    */
   @Test
-  void testWriterClusterEndpointTriggersAliasQueriesOnEveryPluginConnectCall() throws SQLException {
+  void testWriterClusterEndpointTriggersAliasQueriesOnlyOncePerConnection() throws SQLException {
     String writerClusterHost = "my-cluster.cluster-xyz123.us-east-1.rds.amazonaws.com";
     HostSpec writerClusterHostSpec = new HostSpecBuilder(new SimpleHostAvailabilityStrategy())
         .host(writerClusterHost)
@@ -353,21 +334,17 @@ class AuroraConnectionTrackerPluginAliasQueryBugTest {
       assertEquals(mockConnection, conn);
     }
 
-    assertEquals(numberOfGetConnectionCalls, fillAliasesCallCount.get(),
-        "BUG: Writer cluster endpoint triggers fillAliases on every getConnection()");
-    assertEquals(numberOfGetConnectionCalls, aliasQueryExecutionCount.get());
+    // After fix: fillAliases should only be called once for the same physical connection
+    assertEquals(1, fillAliasesCallCount.get(),
+        "fillAliases should only be called once for same connection");
+    assertEquals(1, aliasQueryExecutionCount.get());
   }
 
   /**
-   * Tests that reader cluster endpoints also trigger alias queries on every plugin.connect() call.
-   *
-   * <p><b>Note:</b> This bug does NOT manifest with standard external HikariCP pooling because
-   * HikariCP only invokes the AWS wrapper when creating new physical connections. This test
-   * only demonstrates the plugin behavior in isolation - the bug requires internal pooling
-   * (HikariPooledConnectionProvider) to manifest in practice.
+   * Tests that reader cluster endpoints correctly trigger alias queries only once per physical connection.
    */
   @Test
-  void testReaderClusterEndpointTriggersAliasQueriesOnEveryPluginConnectCall() throws SQLException {
+  void testReaderClusterEndpointTriggersAliasQueriesOnlyOncePerConnection() throws SQLException {
     String readerClusterHost = "my-cluster.cluster-ro-xyz123.us-east-1.rds.amazonaws.com";
     HostSpec readerClusterHostSpec = new HostSpecBuilder(new SimpleHostAvailabilityStrategy())
         .host(readerClusterHost)
@@ -398,8 +375,66 @@ class AuroraConnectionTrackerPluginAliasQueryBugTest {
       assertEquals(mockConnection, conn);
     }
 
-    assertEquals(numberOfGetConnectionCalls, fillAliasesCallCount.get(),
-        "BUG: Reader cluster endpoint triggers fillAliases on every getConnection()");
-    assertEquals(numberOfGetConnectionCalls, aliasQueryExecutionCount.get());
+    // After fix: fillAliases should only be called once for the same physical connection
+    assertEquals(1, fillAliasesCallCount.get(),
+        "fillAliases should only be called once for same connection");
+    assertEquals(1, aliasQueryExecutionCount.get());
+  }
+
+  /**
+   * Tests that after a connection is closed, the alias cache is cleaned up,
+   * allowing a new connection to properly initialize aliases.
+   *
+   * <p>This ensures that:
+   * <ul>
+   *   <li>Connection close removes the entry from aliasedConnections</li>
+   *   <li>A new physical connection will have its aliases populated</li>
+   *   <li>Memory is properly cleaned up (no leaks)</li>
+   * </ul>
+   */
+  @Test
+  void testAliasesReInitializedAfterConnectionClose() throws Exception {
+    HostSpec customClusterHostSpec = new HostSpecBuilder(new SimpleHostAvailabilityStrategy())
+        .host(CUSTOM_CLUSTER_HOST)
+        .port(PORT)
+        .build();
+
+    when(mockPluginService.getCurrentHostSpec()).thenReturn(customClusterHostSpec);
+    when(mockPluginService.getCurrentConnection()).thenReturn(mockConnection);
+
+    RdsUtils rdsUtils = new RdsUtils();
+    AuroraConnectionTrackerPlugin plugin = new AuroraConnectionTrackerPlugin(
+        mockPluginService,
+        new Properties(),
+        rdsUtils,
+        mockTracker);
+
+    JdbcCallable<Connection, SQLException> connectFunc = () -> mockConnection;
+
+    // First connect - should populate aliases
+    plugin.connect(PROTOCOL, customClusterHostSpec, new Properties(), true, connectFunc);
+    assertEquals(1, fillAliasesCallCount.get(), "First connect should populate aliases");
+
+    // Second connect with same connection - should NOT populate aliases
+    plugin.connect(PROTOCOL, customClusterHostSpec, new Properties(), false, connectFunc);
+    assertEquals(1, fillAliasesCallCount.get(), "Second connect should skip aliases");
+
+    // Simulate connection close via execute()
+    JdbcCallable<Void, SQLException> closeFunc = () -> null;
+    plugin.execute(Void.class, SQLException.class, mockConnection,
+        "Connection.close", closeFunc, new Object[]{});
+
+    // Create a new mock connection (simulating pool creating new physical connection)
+    Connection newMockConnection = mock(Connection.class);
+    when(newMockConnection.isValid(any(Integer.class))).thenReturn(true);
+    when(newMockConnection.createStatement()).thenReturn(mockStatement);
+    when(mockPluginService.getCurrentConnection()).thenReturn(newMockConnection);
+
+    JdbcCallable<Connection, SQLException> newConnectFunc = () -> newMockConnection;
+
+    // Connect with new connection - should populate aliases again
+    plugin.connect(PROTOCOL, customClusterHostSpec, new Properties(), true, newConnectFunc);
+    assertEquals(2, fillAliasesCallCount.get(),
+        "New connection after close should populate aliases");
   }
 }
