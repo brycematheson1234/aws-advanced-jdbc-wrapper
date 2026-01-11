@@ -54,6 +54,8 @@ public class DataSourceConnectionProvider implements ConnectionProvider {
           put(RandomHostSelector.STRATEGY_RANDOM, new RandomHostSelector());
           put(RoundRobinHostSelector.STRATEGY_ROUND_ROBIN, new RoundRobinHostSelector());
           put(WeightedRandomHostSelector.STRATEGY_WEIGHTED_RANDOM, new WeightedRandomHostSelector());
+          put(LeastConnectionsNoInternalPoolHostSelector.STRATEGY_LEAST_CONNECTIONS_NO_INTERNAL_POOL,
+              new LeastConnectionsNoInternalPoolHostSelector());
         }
       });
   private final @NonNull DataSource dataSource;

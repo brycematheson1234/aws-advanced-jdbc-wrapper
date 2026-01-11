@@ -51,6 +51,8 @@ public class C3P0PooledConnectionProvider implements PooledConnectionProvider, C
           put(RandomHostSelector.STRATEGY_RANDOM, new RandomHostSelector());
           put(RoundRobinHostSelector.STRATEGY_ROUND_ROBIN, new RoundRobinHostSelector());
           put(WeightedRandomHostSelector.STRATEGY_WEIGHTED_RANDOM, new WeightedRandomHostSelector());
+          put(LeastConnectionsNoInternalPoolHostSelector.STRATEGY_LEAST_CONNECTIONS_NO_INTERNAL_POOL,
+              new LeastConnectionsNoInternalPoolHostSelector());
         }
       });
   protected static final long poolExpirationCheckNanos = TimeUnit.MINUTES.toNanos(30);
